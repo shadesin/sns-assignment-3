@@ -90,9 +90,22 @@ python client.py --client-id clientB --service-id fileserver
 python client.py --client-id clientC --service-id mailserver
 ```
 
+Client resilience note:
+- client flow tolerates one unavailable AS and one unavailable TGS (it proceeds as long as at least 2 authorities in that phase are reachable)
+- if fewer than 2 authorities are reachable in a phase, client exits with a clear error
+
 4. Run mandatory attack suite:
 ```bash
 python attacks.py
+```
+
+By default, `attacks.py` uses the AS/TGS/service servers you already started, so attack traffic appears in those server terminals.
+
+In this default mode, the "authority offline" scenario takes AS1 down and leaves it offline after that scenario, so subsequent client runs observe reduced AS availability.
+
+Optional self-contained mode (for quick standalone testing):
+```bash
+python attacks.py --self-contained
 ```
 
 ## Mandatory Attack Coverage

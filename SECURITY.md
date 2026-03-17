@@ -57,7 +57,8 @@ These checks jointly block single-authority forgery, simple payload mutation, st
 ## 7. Nonce Reuse Risk in Schnorr
 - Schnorr security critically depends on fresh per-signature nonce `k`.
 - Reusing nonce across two signatures can leak the private key algebraically.
-- Nonce generation here uses OS-backed randomness (`SystemRandom`) per sign operation.
+- Nonce generation for Schnorr signing uses OS-backed randomness (`SystemRandom`) per sign operation.
+- Ticket session keys use OS-backed randomness (`os.urandom`) in both client protocol flow and attack payload generation.
 - Operational requirement: do not replace RNG with deterministic or low-entropy source.
 
 ## 8. Key Leakage Impact Analysis
@@ -76,7 +77,15 @@ These checks jointly block single-authority forgery, simple payload mutation, st
 - One authority offline -> still works because any two authorities suffice.
 - One valid signature only -> blocked by threshold check.
 
-## 10. Performance-Security Tradeoff
+## 10. Attack Execution Modes and Offline Lifecycle
+- `attacks.py` supports two execution modes:
+	- Default mode: uses already-running AS/TGS/service processes.
+	- Self-contained mode (`--self-contained`): starts and stops internal AS/TGS/service processes per scenario.
+- In default mode, the `authority_offline` scenario actively takes down AS1 and leaves it offline after the scenario.
+- Subsequent scenarios and normal client runs are expected to observe reduced AS availability until AS1 is restarted.
+- AS-dependent attack scenarios are written to proceed with currently reachable AS authorities (minimum 2), preventing post-offline crash chains.
+
+## 11. Performance-Security Tradeoff
 - Additional cost compared to single-signer model:
 	- more authority communication (collect >=2 shares)
 	- more signature verifications at service
@@ -86,7 +95,12 @@ These checks jointly block single-authority forgery, simple payload mutation, st
 	- operational resilience under one authority outage
 - Benchmark evidence in README shows overhead remains low on localhost (single-digit milliseconds per phase).
 
-## 11. Residual Risks and Limitations
+## 12. Observability and Auditability
+- AS, TGS, and service servers log connection lifecycle (`CONNECT`, `REQUEST`, `RESPONSE`, `DISCONNECT`) with timestamps.
+- Request logs include action and contextual identifiers (for example, `client_id`, `service_id` where available).
+- Service logs include explicit rejection reasons, improving forensic clarity during attack demonstrations.
+
+## 13. Residual Risks and Limitations
 - This is a lab implementation and omits TLS channel protection.
 - Public-key registry is local-file based for demonstration.
 - Host compromise can still bypass process-level assumptions.

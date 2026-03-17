@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
-import random
+import os
+import socket
 import subprocess
 import sys
 import time
+import signal
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -33,11 +36,22 @@ def _detail(attempt: str, expected_defense: str, resp: dict) -> str:
     )
 
 
+def _ts() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def _scenario_log(name: str, msg: str) -> None:
+    print(f"[{_ts()}] [Scenario:{name}] {msg}")
+
+
 def _launch(cmd: List[str]) -> subprocess.Popen:
     return subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
-def _start_system(offline: list[str] | None = None) -> list[subprocess.Popen]:
+def _start_system(offline: list[str] | None = None, use_running_servers: bool = True) -> list[subprocess.Popen]:
+    if use_running_servers:
+        return []
+
     offline_set = set(offline or [])
     procs: list[subprocess.Popen] = []
     for aid, port in AS_PORTS.items():
@@ -81,16 +95,47 @@ def _key_versions() -> dict[str, int]:
     return {k: int(v) for k, v in data["key_versions"].items()}
 
 
-def scenario_single_malicious_authority_forged_ticket() -> Tuple[bool, str]:
-    procs = _start_system()
+def _is_listening(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.4)
+        return s.connect_ex((HOST, port)) == 0
+
+
+def _listener_pid(port: int) -> int | None:
     try:
-        _, versions = fetch_authority_info(AS_PORTS)
-        payload = build_ticket_payload("clientA", "fileserver", random.randbytes(32).hex(), versions)
-        forged_sig = {"authority_id": "AS1", "R": "2", "s": "3", "key_version": versions["AS1"]}
+        out = subprocess.check_output(
+            ["lsof", "-tiTCP:%d" % port, "-sTCP:LISTEN"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except subprocess.CalledProcessError:
+        return None
+    if not out:
+        return None
+    first = out.splitlines()[0].strip()
+    return int(first) if first.isdigit() else None
+
+
+def _wait_port_state(port: int, should_listen: bool, timeout: float = 3.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _is_listening(port) == should_listen:
+            return True
+        time.sleep(0.1)
+    return _is_listening(port) == should_listen
+
+
+def scenario_single_malicious_authority_forged_ticket(use_running_servers: bool) -> Tuple[bool, str]:
+    procs = _start_system(use_running_servers=use_running_servers)
+    try:
+        _, versions = fetch_authority_info(AS_PORTS, min_required=2, require_all=False)
+        payload = build_ticket_payload("clientA", "fileserver", os.urandom(32).hex(), versions)
+        forged_aid = next(iter(versions.keys()))
+        forged_sig = {"authority_id": forged_aid, "R": "2", "s": "3", "key_version": versions[forged_aid]}
         forged_ticket = encrypt_ticket(payload, [forged_sig])
         resp = authenticate_with_service(forged_ticket)
         details = _detail(
-            "Injected ticket with exactly one forged AS signature",
+            f"Injected ticket with exactly one forged AS signature ({forged_aid})",
             "service enforces minimum two independent valid signatures (2-of-3)",
             resp,
         )
@@ -99,8 +144,8 @@ def scenario_single_malicious_authority_forged_ticket() -> Tuple[bool, str]:
         _stop_system(procs)
 
 
-def scenario_modified_ticket_payload() -> Tuple[bool, str]:
-    procs = _start_system()
+def scenario_modified_ticket_payload(use_running_servers: bool) -> Tuple[bool, str]:
+    procs = _start_system(use_running_servers=use_running_servers)
     try:
         tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
         ticket = request_service_ticket("clientA", TGS_PORTS, tgs_public, tgs_versions, "fileserver")
@@ -118,15 +163,15 @@ def scenario_modified_ticket_payload() -> Tuple[bool, str]:
         _stop_system(procs)
 
 
-def scenario_replay_old_partial_signature() -> Tuple[bool, str]:
-    procs = _start_system()
+def scenario_replay_old_partial_signature(use_running_servers: bool) -> Tuple[bool, str]:
+    procs = _start_system(use_running_servers=use_running_servers)
     try:
         tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
         old_ticket = request_service_ticket("clientA", TGS_PORTS, tgs_public, tgs_versions, "fileserver")
         old_decoded = decrypt_ticket(old_ticket)
         replayed_sig = old_decoded["signatures"][0]
 
-        new_payload = build_ticket_payload("clientA", "fileserver", random.randbytes(32).hex(), _key_versions())
+        new_payload = build_ticket_payload("clientA", "fileserver", os.urandom(32).hex(), _key_versions())
         fake_sig = {"authority_id": "TGS3", "R": "7", "s": "11", "key_version": 1}
         replay_ticket = encrypt_ticket(new_payload, [replayed_sig, fake_sig])
         resp = authenticate_with_service(replay_ticket)
@@ -140,8 +185,8 @@ def scenario_replay_old_partial_signature() -> Tuple[bool, str]:
         _stop_system(procs)
 
 
-def scenario_leakage_of_one_private_key() -> Tuple[bool, str]:
-    procs = _start_system()
+def scenario_leakage_of_one_private_key(use_running_servers: bool) -> Tuple[bool, str]:
+    procs = _start_system(use_running_servers=use_running_servers)
     try:
         tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
         legit = request_service_ticket("clientA", TGS_PORTS, tgs_public, tgs_versions, "fileserver")
@@ -160,9 +205,31 @@ def scenario_leakage_of_one_private_key() -> Tuple[bool, str]:
         _stop_system(procs)
 
 
-def scenario_authority_offline() -> Tuple[bool, str]:
-    procs = _start_system(offline=["AS1"])
+def scenario_authority_offline(use_running_servers: bool) -> Tuple[bool, str]:
+    procs = _start_system(offline=["AS1"], use_running_servers=use_running_servers)
+    killed_pid: int | None = None
     try:
+        if use_running_servers:
+            pid = _listener_pid(AS_PORTS["AS1"])
+            if pid is None:
+                return (
+                    False,
+                    "Attempt: authority offline scenario with external servers\n"
+                    "Observed: AS1 is not running on port 9101\n"
+                    "Reason: cannot demonstrate takedown because AS1 was already offline\n"
+                    "How to fix: start AS1, then rerun attacks.py",
+                )
+
+            os.kill(pid, signal.SIGTERM)
+            killed_pid = pid
+            if not _wait_port_state(AS_PORTS["AS1"], should_listen=False, timeout=3.0):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if not _wait_port_state(AS_PORTS["AS1"], should_listen=False, timeout=1.5):
+                    return False, "Failed to bring AS1 offline during offline scenario"
+
         active_as = {k: v for k, v in AS_PORTS.items() if k != "AS1"}
         as_public, as_versions = fetch_authority_info(active_as)
         _tgt = request_tgt("clientA", active_as, as_public, as_versions)
@@ -180,19 +247,23 @@ def scenario_authority_offline() -> Tuple[bool, str]:
             )
         return False, _format_response_details(resp)
     finally:
+        if use_running_servers and killed_pid is not None:
+            print("[attacks.py] AS1 left offline after authority_offline scenario")
+
         _stop_system(procs)
 
 
-def scenario_ticket_with_only_one_valid_signature() -> Tuple[bool, str]:
-    procs = _start_system()
+def scenario_ticket_with_only_one_valid_signature(use_running_servers: bool) -> Tuple[bool, str]:
+    procs = _start_system(use_running_servers=use_running_servers)
     try:
-        _, versions = fetch_authority_info(AS_PORTS)
-        payload = build_ticket_payload("clientA", "fileserver", random.randbytes(32).hex(), versions)
-        one_sig = {"authority_id": "AS1", "R": "17", "s": "19", "key_version": versions["AS1"]}
+        _, versions = fetch_authority_info(AS_PORTS, min_required=2, require_all=False)
+        payload = build_ticket_payload("clientA", "fileserver", os.urandom(32).hex(), versions)
+        one_aid = next(iter(versions.keys()))
+        one_sig = {"authority_id": one_aid, "R": "17", "s": "19", "key_version": versions[one_aid]}
         ticket = encrypt_ticket(payload, [one_sig])
         resp = authenticate_with_service(ticket)
         details = _detail(
-            "Submitted ticket containing only one signature",
+            f"Submitted ticket containing only one signature ({one_aid})",
             "policy requires at least two valid authority signatures",
             resp,
         )
@@ -201,7 +272,7 @@ def scenario_ticket_with_only_one_valid_signature() -> Tuple[bool, str]:
         _stop_system(procs)
 
 
-def run_all() -> Dict[str, Dict[str, object]]:
+def run_all(use_running_servers: bool) -> Dict[str, Dict[str, object]]:
     scenarios = {
         "single_malicious_authority_forged_ticket": scenario_single_malicious_authority_forged_ticket,
         "modified_ticket_payload": scenario_modified_ticket_payload,
@@ -231,21 +302,50 @@ def run_all() -> Dict[str, Dict[str, object]]:
             # Non-interactive mode fallback.
             pass
 
-        ok, details = fn()
+        _scenario_log(name, "START")
+
+        ok, details = fn(use_running_servers)
         out[name] = {"pass": ok, "details": details}
 
         verdict = "PASS" if ok else "FAIL"
         print(f"Result: {verdict}")
         print(f"Details: {details}")
+
+        try:
+            as_reachable = len(fetch_authority_info(AS_PORTS, min_required=0, require_all=False)[0])
+        except Exception:
+            as_reachable = 0
+        try:
+            tgs_reachable = len(fetch_authority_info(TGS_PORTS, min_required=0, require_all=False)[0])
+        except Exception:
+            tgs_reachable = 0
+        _scenario_log(
+            name,
+            f"END verdict={verdict} reachable_as={as_reachable} reachable_tgs={tgs_reachable} service={DEFAULT_SERVICE_ID}",
+        )
     return out
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run mandatory attack suite")
+    parser.add_argument(
+        "--self-contained",
+        action="store_true",
+        help="Start and stop AS/TGS/service nodes internally for each scenario",
+    )
+    args = parser.parse_args()
+    use_running_servers = not args.self_contained
+
     # Ensure a keystore exists before spinning up nodes.
     if not Path(PUBLIC_REGISTRY_FILE).exists():
         subprocess.check_call([sys.executable, "master_keygen.py"], cwd=str(ROOT))
 
-    results = run_all()
+    if use_running_servers:
+        print("Mode: using already-running AS/TGS/service servers")
+    else:
+        print("Mode: self-contained (attacks.py starts/stops servers internally)")
+
+    results = run_all(use_running_servers)
     passed = sum(1 for item in results.values() if item.get("pass"))
     total = len(results)
 

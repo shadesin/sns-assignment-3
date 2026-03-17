@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
+import os
 import socket
 import statistics
 import time
@@ -37,9 +37,15 @@ def send_json_request(host: str, port: int, request_obj: dict, timeout: float = 
     return json.loads(data.decode("utf-8"))
 
 
-def fetch_authority_info(authority_ports: Dict[str, int]) -> Tuple[Dict[str, int], Dict[str, int]]:
-    public_keys = {}
-    key_versions = {}
+def fetch_authority_info(
+    authority_ports: Dict[str, int],
+    min_required: int = 2,
+    require_all: bool = False,
+) -> Tuple[Dict[str, int], Dict[str, int]]:
+    public_keys: Dict[str, int] = {}
+    key_versions: Dict[str, int] = {}
+    unavailable: list[str] = []
+
     for aid, port in authority_ports.items():
         last_err = None
         resp = None
@@ -51,11 +57,24 @@ def fetch_authority_info(authority_ports: Dict[str, int]) -> Tuple[Dict[str, int
                 last_err = exc
                 time.sleep(0.25)
         if resp is None:
-            raise RuntimeError(f"get_public_info failed for {aid}: {last_err}")
+            unavailable.append(f"{aid} ({last_err})")
+            continue
         if not resp.get("ok"):
-            raise RuntimeError(f"get_public_info failed for {aid}: {resp}")
+            unavailable.append(f"{aid} ({resp})")
+            continue
         public_keys[aid] = int(resp["public_key"])
         key_versions[aid] = int(resp["key_version"])
+
+    if require_all and unavailable:
+        raise RuntimeError("Unavailable authorities: " + ", ".join(unavailable))
+    if len(public_keys) < min_required:
+        raise RuntimeError(
+            f"Only {len(public_keys)} authorities reachable, need at least {min_required}. "
+            f"Unavailable: {', '.join(unavailable) if unavailable else 'none'}"
+        )
+    if unavailable:
+        print(f"[Client] Warning: unavailable authorities skipped: {', '.join(unavailable)}")
+
     return public_keys, key_versions
 
 
@@ -103,7 +122,7 @@ def request_tgt(
     as_public_keys: Dict[str, int],
     as_key_versions: Dict[str, int],
 ) -> dict:
-    session_key = random.randbytes(32).hex()
+    session_key = os.urandom(32).hex()
     payload = build_ticket_payload(client_id, "krbtgt", session_key, as_key_versions)
     signatures = collect_partial_signatures(
         as_ports,
@@ -122,7 +141,7 @@ def request_service_ticket(
     tgs_key_versions: Dict[str, int],
     service_id: str,
 ) -> dict:
-    session_key = random.randbytes(32).hex()
+    session_key = os.urandom(32).hex()
     payload = build_ticket_payload(client_id, service_id, session_key, tgs_key_versions)
     signatures = collect_partial_signatures(
         tgs_ports,
@@ -143,6 +162,8 @@ def run_benchmark(client_id: str, service_id: str, service_port: int, rounds: in
 
     as_public, as_versions = fetch_authority_info(AS_PORTS)
     tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+    active_as_ports = {aid: AS_PORTS[aid] for aid in as_public}
+    active_tgs_ports = {aid: TGS_PORTS[aid] for aid in tgs_public}
 
     tgt_times = []
     st_times = []
@@ -150,10 +171,10 @@ def run_benchmark(client_id: str, service_id: str, service_port: int, rounds: in
 
     for _ in range(rounds):
         t0 = time.perf_counter()
-        _tgt = request_tgt(client_id, AS_PORTS, as_public, as_versions)
+        _tgt = request_tgt(client_id, active_as_ports, as_public, as_versions)
         t1 = time.perf_counter()
 
-        st = request_service_ticket(client_id, TGS_PORTS, tgs_public, tgs_versions, service_id)
+        st = request_service_ticket(client_id, active_tgs_ports, tgs_public, tgs_versions, service_id)
         t2 = time.perf_counter()
 
         resp = authenticate_with_service(st, service_port=service_port)
@@ -194,19 +215,21 @@ def main() -> None:
 
     print("[Client] Fetching AS public info...")
     as_public, as_versions = fetch_authority_info(AS_PORTS)
+    active_as_ports = {aid: AS_PORTS[aid] for aid in as_public}
     print(f"[Client] AS key versions loaded for {len(as_versions)} authorities.")
 
     print("[Client] Fetching TGS public info...")
     tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+    active_tgs_ports = {aid: TGS_PORTS[aid] for aid in tgs_public}
     print(f"[Client] TGS key versions loaded for {len(tgs_versions)} authorities.")
 
     print("[Client] Requesting TGT with 2-of-3 AS signatures...")
-    tgt = request_tgt(args.client_id, AS_PORTS, as_public, as_versions)
+    tgt = request_tgt(args.client_id, active_as_ports, as_public, as_versions)
     tgt_sig_count = len(decrypt_ticket(tgt).get("signatures", []))
     print(f"[Client] TGT issued successfully. Signatures collected: {tgt_sig_count}")
 
     print("[Client] Requesting Service Ticket with 2-of-3 TGS signatures...")
-    st = request_service_ticket(args.client_id, TGS_PORTS, tgs_public, tgs_versions, args.service_id)
+    st = request_service_ticket(args.client_id, active_tgs_ports, tgs_public, tgs_versions, args.service_id)
     st_sig_count = len(decrypt_ticket(st).get("signatures", []))
     print(f"[Client] Service Ticket issued successfully. Signatures collected: {st_sig_count}")
 

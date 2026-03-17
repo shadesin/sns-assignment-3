@@ -5,38 +5,55 @@ from __future__ import annotations
 import argparse
 import json
 import socketserver
+from datetime import datetime
 from typing import Dict
 
 from crypto_utils import HOST, TGS_PORTS, load_or_create_authority_key, schnorr_sign
 
 
 class JsonHandler(socketserver.StreamRequestHandler):
+    @staticmethod
+    def _ts() -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _log(self, server_id: str, msg: str) -> None:
+        print(f"[{self._ts()}] [{server_id}] {msg}", flush=True)
+
     def handle(self) -> None:
         peer = f"{self.client_address[0]}:{self.client_address[1]}"
         server_id = self.server.authority_id  # type: ignore[attr-defined]
-        print(f"[{server_id}] CONNECT {peer}", flush=True)
+        self._log(server_id, f"CONNECT {peer}")
         try:
             raw = self.rfile.readline()
             if not raw:
-                print(f"[{server_id}] EMPTY_REQUEST {peer}", flush=True)
+                self._log(server_id, f"EMPTY_REQUEST {peer}")
                 return
             try:
                 req = json.loads(raw.decode("utf-8"))
             except json.JSONDecodeError:
-                print(f"[{server_id}] INVALID_JSON {peer}", flush=True)
+                self._log(server_id, f"INVALID_JSON {peer}")
                 self._send({"ok": False, "error": "Invalid JSON"})
                 return
 
             action = req.get("action")
-            print(f"[{server_id}] REQUEST {peer} action={action}", flush=True)
+            context = ""
+            payload = req.get("payload")
+            if isinstance(payload, dict):
+                cid = payload.get("client_id")
+                sid = payload.get("service_id")
+                if isinstance(cid, str):
+                    context += f" client_id={cid}"
+                if isinstance(sid, str):
+                    context += f" service_id={sid}"
+            self._log(server_id, f"REQUEST {peer} action={action}{context}")
             response = self.server.dispatch(req)  # type: ignore[attr-defined]
-            print(
-                f"[{server_id}] RESPONSE {peer} ok={bool(response.get('ok', False))}",
-                flush=True,
-            )
+            if response.get("ok"):
+                self._log(server_id, f"RESPONSE {peer} ok=True")
+            else:
+                self._log(server_id, f"RESPONSE {peer} ok=False error={response.get('error', 'Unknown error')}")
             self._send(response)
         finally:
-            print(f"[{server_id}] DISCONNECT {peer}", flush=True)
+            self._log(server_id, f"DISCONNECT {peer}")
 
     def _send(self, obj: Dict[str, object]) -> None:
         self.wfile.write((json.dumps(obj) + "\n").encode("utf-8"))
