@@ -1,0 +1,16 @@
+# Ignore everything by default
+*
+
+# Keep this file
+!.gitignore
+
+# Keep required deliverables
+!master_keygen.py
+!as_node.py
+!tgs_node.py
+!service_server.py
+!client.py
+!crypto_utils.py
+!attacks.py
+!README.md
+!SECURITY.md
