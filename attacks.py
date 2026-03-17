@@ -22,6 +22,17 @@ def _format_response_details(resp: dict) -> str:
     return f"Service rejected ticket. Reason: {resp.get('error', 'Unknown error')}"
 
 
+def _detail(attempt: str, expected_defense: str, resp: dict) -> str:
+    observed = "Service accepted ticket" if resp.get("ok") else "Service rejected ticket"
+    reason = resp.get("message", "No message") if resp.get("ok") else resp.get("error", "Unknown error")
+    return (
+        f"Attempt: {attempt}\n"
+        f"Observed: {observed}\n"
+        f"Reason: {reason}\n"
+        f"Why blocked: {expected_defense}"
+    )
+
+
 def _launch(cmd: List[str]) -> subprocess.Popen:
     return subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
@@ -78,7 +89,12 @@ def scenario_single_malicious_authority_forged_ticket() -> Tuple[bool, str]:
         forged_sig = {"authority_id": "AS1", "R": "2", "s": "3", "key_version": versions["AS1"]}
         forged_ticket = encrypt_ticket(payload, [forged_sig])
         resp = authenticate_with_service(forged_ticket)
-        return (not resp.get("ok", False), _format_response_details(resp))
+        details = _detail(
+            "Injected ticket with exactly one forged AS signature",
+            "service enforces minimum two independent valid signatures (2-of-3)",
+            resp,
+        )
+        return (not resp.get("ok", False), details)
     finally:
         _stop_system(procs)
 
@@ -92,7 +108,12 @@ def scenario_modified_ticket_payload() -> Tuple[bool, str]:
         decoded["payload"]["service_id"] = "evilservice"
         tampered = encrypt_ticket(decoded["payload"], decoded["signatures"])
         resp = authenticate_with_service(tampered)
-        return (not resp.get("ok", False), _format_response_details(resp))
+        details = _detail(
+            "Modified signed payload field service_id from fileserver to evilservice",
+            "Schnorr challenge binds signature to payload; tampering invalidates signatures and/or service-id check",
+            resp,
+        )
+        return (not resp.get("ok", False), details)
     finally:
         _stop_system(procs)
 
@@ -109,7 +130,12 @@ def scenario_replay_old_partial_signature() -> Tuple[bool, str]:
         fake_sig = {"authority_id": "TGS3", "R": "7", "s": "11", "key_version": 1}
         replay_ticket = encrypt_ticket(new_payload, [replayed_sig, fake_sig])
         resp = authenticate_with_service(replay_ticket)
-        return (not resp.get("ok", False), _format_response_details(resp))
+        details = _detail(
+            "Reused an old valid partial signature on a different payload",
+            "signature verifies only for its original message; replayed share fails on new payload",
+            resp,
+        )
+        return (not resp.get("ok", False), details)
     finally:
         _stop_system(procs)
 
@@ -124,7 +150,12 @@ def scenario_leakage_of_one_private_key() -> Tuple[bool, str]:
         forged_second = {"authority_id": "TGS2", "R": "13", "s": "29", "key_version": 1}
         ticket = encrypt_ticket(decoded["payload"], [one_real, forged_second])
         resp = authenticate_with_service(ticket)
-        return (not resp.get("ok", False), _format_response_details(resp))
+        details = _detail(
+            "Used one genuine share (simulating one leaked key) plus one forged share",
+            "single-key leakage is contained because second independent valid signature is still required",
+            resp,
+        )
+        return (not resp.get("ok", False), details)
     finally:
         _stop_system(procs)
 
@@ -137,7 +168,13 @@ def scenario_authority_offline() -> Tuple[bool, str]:
         ticket = request_service_ticket("clientA", active_tgs, tgs_versions, DEFAULT_SERVICE_ID)
         resp = authenticate_with_service(ticket, service_port=SERVICE_PORTS[DEFAULT_SERVICE_ID])
         if resp.get("ok"):
-            return True, "Service accepted ticket with one authority offline"
+            return (
+                True,
+                "Attempt: kept TGS3 offline\n"
+                "Observed: Service accepted ticket\n"
+                "Reason: Ticket valid\n"
+                "Why allowed: remaining two TGS authorities are sufficient for 2-of-3 threshold",
+            )
         return False, _format_response_details(resp)
     finally:
         _stop_system(procs)
@@ -151,7 +188,12 @@ def scenario_ticket_with_only_one_valid_signature() -> Tuple[bool, str]:
         one_sig = {"authority_id": "AS1", "R": "17", "s": "19", "key_version": versions["AS1"]}
         ticket = encrypt_ticket(payload, [one_sig])
         resp = authenticate_with_service(ticket)
-        return (not resp.get("ok", False), _format_response_details(resp))
+        details = _detail(
+            "Submitted ticket containing only one signature",
+            "policy requires at least two valid authority signatures",
+            resp,
+        )
+        return (not resp.get("ok", False), details)
     finally:
         _stop_system(procs)
 
