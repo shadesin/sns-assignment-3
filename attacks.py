@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from client import authenticate_with_service, fetch_authority_info, request_service_ticket
+from client import authenticate_with_service, fetch_authority_info, request_service_ticket, request_tgt
 from crypto_utils import AS_PORTS, DEFAULT_SERVICE_ID, HOST, PUBLIC_REGISTRY_FILE, SERVICE_PORTS, TGS_PORTS, build_ticket_payload, decrypt_ticket, encrypt_ticket
 
 ROOT = Path(__file__).resolve().parent
@@ -102,8 +102,8 @@ def scenario_single_malicious_authority_forged_ticket() -> Tuple[bool, str]:
 def scenario_modified_ticket_payload() -> Tuple[bool, str]:
     procs = _start_system()
     try:
-        _, tgs_versions = fetch_authority_info(TGS_PORTS)
-        ticket = request_service_ticket("clientA", TGS_PORTS, tgs_versions, "fileserver")
+        tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+        ticket = request_service_ticket("clientA", TGS_PORTS, tgs_public, tgs_versions, "fileserver")
         decoded = decrypt_ticket(ticket)
         decoded["payload"]["service_id"] = "evilservice"
         tampered = encrypt_ticket(decoded["payload"], decoded["signatures"])
@@ -121,8 +121,8 @@ def scenario_modified_ticket_payload() -> Tuple[bool, str]:
 def scenario_replay_old_partial_signature() -> Tuple[bool, str]:
     procs = _start_system()
     try:
-        _, tgs_versions = fetch_authority_info(TGS_PORTS)
-        old_ticket = request_service_ticket("clientA", TGS_PORTS, tgs_versions, "fileserver")
+        tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+        old_ticket = request_service_ticket("clientA", TGS_PORTS, tgs_public, tgs_versions, "fileserver")
         old_decoded = decrypt_ticket(old_ticket)
         replayed_sig = old_decoded["signatures"][0]
 
@@ -143,8 +143,8 @@ def scenario_replay_old_partial_signature() -> Tuple[bool, str]:
 def scenario_leakage_of_one_private_key() -> Tuple[bool, str]:
     procs = _start_system()
     try:
-        _, tgs_versions = fetch_authority_info(TGS_PORTS)
-        legit = request_service_ticket("clientA", TGS_PORTS, tgs_versions, "fileserver")
+        tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+        legit = request_service_ticket("clientA", TGS_PORTS, tgs_public, tgs_versions, "fileserver")
         decoded = decrypt_ticket(legit)
         one_real = decoded["signatures"][0]
         forged_second = {"authority_id": "TGS2", "R": "13", "s": "29", "key_version": 1}
@@ -161,19 +161,22 @@ def scenario_leakage_of_one_private_key() -> Tuple[bool, str]:
 
 
 def scenario_authority_offline() -> Tuple[bool, str]:
-    procs = _start_system(offline=["TGS3"])
+    procs = _start_system(offline=["AS1"])
     try:
-        active_tgs = {k: v for k, v in TGS_PORTS.items() if k != "TGS3"}
-        _, tgs_versions = fetch_authority_info(active_tgs)
-        ticket = request_service_ticket("clientA", active_tgs, tgs_versions, DEFAULT_SERVICE_ID)
+        active_as = {k: v for k, v in AS_PORTS.items() if k != "AS1"}
+        as_public, as_versions = fetch_authority_info(active_as)
+        _tgt = request_tgt("clientA", active_as, as_public, as_versions)
+
+        tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+        ticket = request_service_ticket("clientA", TGS_PORTS, tgs_public, tgs_versions, DEFAULT_SERVICE_ID)
         resp = authenticate_with_service(ticket, service_port=SERVICE_PORTS[DEFAULT_SERVICE_ID])
         if resp.get("ok"):
             return (
                 True,
-                "Attempt: kept TGS3 offline\n"
+                "Attempt: kept one authority (AS1) offline\n"
                 "Observed: Service accepted ticket\n"
                 "Reason: Ticket valid\n"
-                "Why allowed: remaining two TGS authorities are sufficient for 2-of-3 threshold",
+                "Why allowed: remaining two AS authorities are sufficient for 2-of-3 threshold",
             )
         return False, _format_response_details(resp)
     finally:
@@ -212,8 +215,8 @@ def run_all() -> Dict[str, Dict[str, object]]:
         "modified_ticket_payload": "Attacker modifies ticket payload after signing",
         "replay_old_partial_signature": "Replay old partial signature on new payload",
         "leakage_of_one_private_signing_key": "One authority private key leakage",
-        "authority_offline": "One authority offline but protocol should continue",
-        "ticket_with_only_one_valid_signature": "Ticket contains only one valid signature",
+        "authority_offline": "Authority offline scenario",
+        "ticket_with_only_one_valid_signature": "Ticket containing only one valid signature",
     }
 
     out = {}

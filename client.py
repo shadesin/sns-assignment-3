@@ -10,7 +10,17 @@ import statistics
 import time
 from typing import Dict, List, Tuple
 
-from crypto_utils import AS_PORTS, DEFAULT_SERVICE_ID, HOST, SERVICE_PORTS, TGS_PORTS, build_ticket_payload, decrypt_ticket, encrypt_ticket
+from crypto_utils import (
+    AS_PORTS,
+    DEFAULT_SERVICE_ID,
+    HOST,
+    SERVICE_PORTS,
+    TGS_PORTS,
+    build_ticket_payload,
+    decrypt_ticket,
+    encrypt_ticket,
+    schnorr_verify,
+)
 
 
 def send_json_request(host: str, port: int, request_obj: dict, timeout: float = 3.0) -> dict:
@@ -49,15 +59,37 @@ def fetch_authority_info(authority_ports: Dict[str, int]) -> Tuple[Dict[str, int
     return public_keys, key_versions
 
 
-def collect_partial_signatures(authority_ports: Dict[str, int], action: str, payload: dict) -> List[dict]:
+def collect_partial_signatures(
+    authority_ports: Dict[str, int],
+    action: str,
+    payload: dict,
+    public_keys: Dict[str, int],
+    expected_versions: Dict[str, int],
+) -> List[dict]:
     signatures: List[dict] = []
     for aid, port in authority_ports.items():
         try:
             resp = send_json_request(HOST, port, {"action": action, "payload": payload})
         except Exception:
             continue
-        if resp.get("ok") and resp.get("signature"):
-            signatures.append(resp["signature"])
+        if not resp.get("ok") or not resp.get("signature"):
+            continue
+
+        sig = resp["signature"]
+        if not isinstance(sig, dict):
+            continue
+
+        resp_aid = resp.get("authority_id")
+        if not isinstance(resp_aid, str) or resp_aid not in public_keys:
+            continue
+        if sig.get("authority_id") != resp_aid:
+            continue
+        if int(sig.get("key_version", -1)) != int(expected_versions.get(resp_aid, -2)):
+            continue
+        if not schnorr_verify(payload, sig, public_keys[resp_aid]):
+            continue
+
+        signatures.append(sig)
         if len(signatures) >= 2:
             break
     if len(signatures) < 2:
@@ -65,17 +97,40 @@ def collect_partial_signatures(authority_ports: Dict[str, int], action: str, pay
     return signatures
 
 
-def request_tgt(client_id: str, as_ports: Dict[str, int], as_key_versions: Dict[str, int]) -> dict:
+def request_tgt(
+    client_id: str,
+    as_ports: Dict[str, int],
+    as_public_keys: Dict[str, int],
+    as_key_versions: Dict[str, int],
+) -> dict:
     session_key = random.randbytes(32).hex()
     payload = build_ticket_payload(client_id, "krbtgt", session_key, as_key_versions)
-    signatures = collect_partial_signatures(as_ports, "issue_tgt_partial", payload)
+    signatures = collect_partial_signatures(
+        as_ports,
+        "issue_tgt_partial",
+        payload,
+        as_public_keys,
+        as_key_versions,
+    )
     return encrypt_ticket(payload, signatures)
 
 
-def request_service_ticket(client_id: str, tgs_ports: Dict[str, int], tgs_key_versions: Dict[str, int], service_id: str) -> dict:
+def request_service_ticket(
+    client_id: str,
+    tgs_ports: Dict[str, int],
+    tgs_public_keys: Dict[str, int],
+    tgs_key_versions: Dict[str, int],
+    service_id: str,
+) -> dict:
     session_key = random.randbytes(32).hex()
     payload = build_ticket_payload(client_id, service_id, session_key, tgs_key_versions)
-    signatures = collect_partial_signatures(tgs_ports, "issue_st_partial", payload)
+    signatures = collect_partial_signatures(
+        tgs_ports,
+        "issue_st_partial",
+        payload,
+        tgs_public_keys,
+        tgs_key_versions,
+    )
     return encrypt_ticket(payload, signatures)
 
 
@@ -86,8 +141,8 @@ def authenticate_with_service(ticket_blob: dict, service_port: int = SERVICE_POR
 def run_benchmark(client_id: str, service_id: str, service_port: int, rounds: int) -> None:
     print(f"[Benchmark] Starting benchmark for client={client_id}, service={service_id}, rounds={rounds}")
 
-    _as_public, as_versions = fetch_authority_info(AS_PORTS)
-    _tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+    as_public, as_versions = fetch_authority_info(AS_PORTS)
+    tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
 
     tgt_times = []
     st_times = []
@@ -95,10 +150,10 @@ def run_benchmark(client_id: str, service_id: str, service_port: int, rounds: in
 
     for _ in range(rounds):
         t0 = time.perf_counter()
-        _tgt = request_tgt(client_id, AS_PORTS, as_versions)
+        _tgt = request_tgt(client_id, AS_PORTS, as_public, as_versions)
         t1 = time.perf_counter()
 
-        st = request_service_ticket(client_id, TGS_PORTS, tgs_versions, service_id)
+        st = request_service_ticket(client_id, TGS_PORTS, tgs_public, tgs_versions, service_id)
         t2 = time.perf_counter()
 
         resp = authenticate_with_service(st, service_port=service_port)
@@ -138,20 +193,20 @@ def main() -> None:
         return
 
     print("[Client] Fetching AS public info...")
-    _as_public, as_versions = fetch_authority_info(AS_PORTS)
+    as_public, as_versions = fetch_authority_info(AS_PORTS)
     print(f"[Client] AS key versions loaded for {len(as_versions)} authorities.")
 
     print("[Client] Fetching TGS public info...")
-    _tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
+    tgs_public, tgs_versions = fetch_authority_info(TGS_PORTS)
     print(f"[Client] TGS key versions loaded for {len(tgs_versions)} authorities.")
 
     print("[Client] Requesting TGT with 2-of-3 AS signatures...")
-    tgt = request_tgt(args.client_id, AS_PORTS, as_versions)
+    tgt = request_tgt(args.client_id, AS_PORTS, as_public, as_versions)
     tgt_sig_count = len(decrypt_ticket(tgt).get("signatures", []))
     print(f"[Client] TGT issued successfully. Signatures collected: {tgt_sig_count}")
 
     print("[Client] Requesting Service Ticket with 2-of-3 TGS signatures...")
-    st = request_service_ticket(args.client_id, TGS_PORTS, tgs_versions, args.service_id)
+    st = request_service_ticket(args.client_id, TGS_PORTS, tgs_public, tgs_versions, args.service_id)
     st_sig_count = len(decrypt_ticket(st).get("signatures", []))
     print(f"[Client] Service Ticket issued successfully. Signatures collected: {st_sig_count}")
 

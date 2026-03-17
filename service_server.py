@@ -12,16 +12,31 @@ from crypto_utils import DEFAULT_SERVICE_ID, HOST, SERVICE_PORTS, load_public_re
 
 class JsonHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
-        raw = self.rfile.readline()
-        if not raw:
-            return
+        peer = f"{self.client_address[0]}:{self.client_address[1]}"
+        server_id = self.server.service_id  # type: ignore[attr-defined]
+        print(f"[{server_id}] CONNECT {peer}", flush=True)
         try:
-            req = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
-            self._send({"ok": False, "error": "Invalid JSON"})
-            return
-        resp = self.server.dispatch(req)  # type: ignore[attr-defined]
-        self._send(resp)
+            raw = self.rfile.readline()
+            if not raw:
+                print(f"[{server_id}] EMPTY_REQUEST {peer}", flush=True)
+                return
+            try:
+                req = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                print(f"[{server_id}] INVALID_JSON {peer}", flush=True)
+                self._send({"ok": False, "error": "Invalid JSON"})
+                return
+
+            action = req.get("action")
+            print(f"[{server_id}] REQUEST {peer} action={action}", flush=True)
+            resp = self.server.dispatch(req)  # type: ignore[attr-defined]
+            print(
+                f"[{server_id}] RESPONSE {peer} ok={bool(resp.get('ok', False))}",
+                flush=True,
+            )
+            self._send(resp)
+        finally:
+            print(f"[{server_id}] DISCONNECT {peer}", flush=True)
 
     def _send(self, obj: Dict[str, object]) -> None:
         self.wfile.write((json.dumps(obj) + "\n").encode("utf-8"))

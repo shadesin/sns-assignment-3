@@ -66,6 +66,11 @@ Important key model:
 - each authority generates and stores only its own private key on first startup
 - private keys are not stored in a single shared private-key file
 
+Optional cleanup before starting nodes (recommended if you see "Address already in use"):
+```bash
+lsof -tiTCP:9101,9102,9103,9201,9202,9203,9301,9302 -sTCP:LISTEN | tr '\n' ' ' | xargs -r kill -9
+```
+
 2. Start authorities and service servers (separate terminals):
 ```bash
 python as_node.py --id AS1
@@ -99,7 +104,7 @@ python attacks.py
 - authority offline scenario
 - ticket containing only one valid signature
 
-## Performance Benchmarking (Extensive)
+## Performance Benchmarking
 
 ### Methodology
 - Environment: local machine, localhost TCP, Python virtual environment.
@@ -122,17 +127,17 @@ python client.py --benchmark-rounds 30 --client-id <client> --service-id <servic
 
 | Client | Service | AS Phase Mean (ms) | AS Median | AS Min | AS Max | TGS Phase Mean (ms) | TGS Median | TGS Min | TGS Max | Service Auth Mean (ms) | Auth Median | Auth Min | Auth Max |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| clientA | fileserver | 3.348 | 3.215 | 3.103 | 6.360 | 3.209 | 3.168 | 3.041 | 3.768 | 3.985 | 3.978 | 3.744 | 4.858 |
-| clientA | mailserver | 3.293 | 3.272 | 3.146 | 3.921 | 3.219 | 3.215 | 3.078 | 3.466 | 4.069 | 4.029 | 3.845 | 4.906 |
-| clientB | fileserver | 3.307 | 3.285 | 3.174 | 3.729 | 3.197 | 3.193 | 3.081 | 3.389 | 4.043 | 4.026 | 3.885 | 4.271 |
-| clientB | mailserver | 3.295 | 3.269 | 3.084 | 4.122 | 3.201 | 3.191 | 3.006 | 3.361 | 4.028 | 4.021 | 3.869 | 4.331 |
-| clientC | fileserver | 3.491 | 3.255 | 3.149 | 7.598 | 3.606 | 3.235 | 3.041 | 8.322 | 4.548 | 4.050 | 3.836 | 10.326 |
-| clientC | mailserver | 3.325 | 3.278 | 3.152 | 4.259 | 3.220 | 3.200 | 3.080 | 3.419 | 4.077 | 4.079 | 3.872 | 4.305 |
+| clientA | fileserver | 7.122 | 6.984 | 6.828 | 10.591 | 6.993 | 6.989 | 6.768 | 7.367 | 4.084 | 4.034 | 3.886 | 4.841 |
+| clientA | mailserver | 7.019 | 6.981 | 6.807 | 7.716 | 6.968 | 6.975 | 6.770 | 7.128 | 4.094 | 4.081 | 3.915 | 4.832 |
+| clientB | fileserver | 6.961 | 6.924 | 6.731 | 7.709 | 6.882 | 6.875 | 6.690 | 7.054 | 4.052 | 4.054 | 3.889 | 4.236 |
+| clientB | mailserver | 6.950 | 6.926 | 6.784 | 7.509 | 6.868 | 6.868 | 6.696 | 7.122 | 3.987 | 3.986 | 3.871 | 4.103 |
+| clientC | fileserver | 6.903 | 6.873 | 6.700 | 7.594 | 6.860 | 6.837 | 6.712 | 7.072 | 4.033 | 4.019 | 3.922 | 4.208 |
+| clientC | mailserver | 6.943 | 6.930 | 6.633 | 7.641 | 6.890 | 6.893 | 6.727 | 7.007 | 3.999 | 3.989 | 3.876 | 4.247 |
 
 ### Aggregated Averages Across All 6 Cases
-- AS phase mean latency average: 3.343 ms
-- TGS phase mean latency average: 3.275 ms
-- Service authentication mean latency average: 4.125 ms
+- AS phase mean latency average: 6.983 ms
+- TGS phase mean latency average: 6.910 ms
+- Service authentication mean latency average: 4.042 ms
 
 ### Interpretation
 - Typical latency is stable in low single-digit milliseconds for all three phases.
